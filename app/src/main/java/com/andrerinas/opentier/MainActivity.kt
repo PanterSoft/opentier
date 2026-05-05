@@ -1,12 +1,14 @@
 package com.andrerinas.opentier
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
 import android.bluetooth.BluetoothDevice
 import android.content.Context
+import android.content.SharedPreferences
 import android.os.Build
 import android.os.Bundle
-import android.os.ParcelUuid
 import android.util.Log
+import androidx.core.content.edit
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -29,8 +31,13 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
+import androidx.compose.runtime.saveable.rememberSaveable
 import com.andrerinas.opentier.bluetooth.ScooterBleManager
 import com.andrerinas.opentier.protocol.MyTierProtocol
 import com.andrerinas.opentier.protocol.ScooterStatus
@@ -56,16 +63,43 @@ class MainActivity : ComponentActivity() {
 fun DashboardScreen(bleManager: ScooterBleManager) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("OpenTier", Context.MODE_PRIVATE) }
+    DashboardScreen(prefs, bleManager)
+}
+
+@Composable
+fun DashboardScreen(prefs: SharedPreferences, bleManager: ScooterBleManager) {
+    val context = LocalContext.current
     
     val receivedData by bleManager.receivedData.collectAsState()
     val connectionState by bleManager.stateAsFlow().collectAsState(initial = null)
     
+    val lastMac = prefs.getString("last_mac", null)
+    var currentMac by rememberSaveable { mutableStateOf(lastMac) }
+    
     var scooterStatus by remember { mutableStateOf<ScooterStatus?>(null) }
-    var password by remember { mutableStateOf(prefs.getString("password", "000000") ?: "000000") }
     var discoveredDevices = remember { mutableStateListOf<BluetoothDevice>() }
     var isScanning by remember { mutableStateOf(false) }
+    var isAutoConnectEnabled by rememberSaveable { mutableStateOf(true) }
     
-    val lastMac = prefs.getString("last_mac", null)
+    // Passwort und Name pro MAC laden
+    var password by remember(currentMac) { 
+        mutableStateOf(prefs.getString("pass_$currentMac", "") ?: "") 
+    }
+    var scooterCustomName by remember(currentMac) {
+        mutableStateOf(prefs.getString("name_$currentMac", "My Scooter") ?: "My Scooter")
+    }
+
+    LaunchedEffect(scooterCustomName) {
+        if (currentMac != null) {
+            prefs.edit { putString("name_$currentMac", scooterCustomName) }
+        }
+    }
+
+    LaunchedEffect(password) {
+        if (currentMac != null && password.isNotEmpty()) {
+            prefs.edit { putString("pass_$currentMac", password) }
+        }
+    }
 
     val isConnectedOrConnecting = connectionState.toString().uppercase().let { 
         (it.contains("READY") || it.contains("CONNECT") || it.contains("INIT") || it.contains("SERVICE")) && !it.contains("DISCONNECT")
@@ -73,6 +107,7 @@ fun DashboardScreen(bleManager: ScooterBleManager) {
 
     LaunchedEffect(receivedData) {
         receivedData?.let { raw ->
+            Log.d("OpenTier", "Parsing raw data: $raw")
             MyTierProtocol.parseStatus(raw)?.let { newStatus -> 
                 scooterStatus = if (newStatus.batteryPercentage == 0 && scooterStatus != null) {
                     newStatus.copy(batteryPercentage = scooterStatus!!.batteryPercentage)
@@ -83,30 +118,18 @@ fun DashboardScreen(bleManager: ScooterBleManager) {
         }
     }
 
-    LaunchedEffect(password) {
-        prefs.edit().putString("password", password).apply()
-    }
-
-    LaunchedEffect(isConnectedOrConnecting) {
-        if (isConnectedOrConnecting) {
-            while(true) {
-                bleManager.sendCommand(MyTierProtocol.getStatus(password))
-                delay(5000)
-                bleManager.sendCommand("AT+BK$")
-                delay(25000)
-            }
-        }
-    }
-
     val scanner = BluetoothLeScannerCompat.getScanner()
     val scanCallback = remember {
         object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 val device = result.device
                 val name = device.name ?: result.scanRecord?.deviceName
-                if (lastMac != null && device.address == lastMac) {
+                
+                // Auto-Connect nur wenn erlaubt
+                if (isAutoConnectEnabled && lastMac != null && device.address == lastMac) {
                     isScanning = false
                     scanner.stopScan(this)
+                    currentMac = device.address
                     bleManager.connect(device).retry(3, 100).enqueue()
                     return
                 }
@@ -128,45 +151,92 @@ fun DashboardScreen(bleManager: ScooterBleManager) {
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { results ->
         if (results.values.all { it }) {
             isScanning = true
-            scanner.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCallback)
         }
     }
 
-    LaunchedEffect(Unit) {
-        val allGranted = permissions.all { 
-            androidx.core.content.ContextCompat.checkSelfPermission(context, it) == android.content.pm.PackageManager.PERMISSION_GRANTED 
+    LaunchedEffect(currentMac) {
+        if (currentMac != null && !isConnectedOrConnecting) {
+            try {
+                val adapter = BluetoothAdapter.getDefaultAdapter()
+                if (adapter != null) {
+                    val device = adapter.getRemoteDevice(currentMac)
+                    bleManager.connect(device).retry(3, 100).enqueue()
+                }
+            } catch (e: Exception) {
+                Log.e("OpenTier", "Failed to auto-reconnect: ${e.message}")
+            }
         }
-        if (allGranted) {
-            isScanning = true
-            scanner.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCallback)
+    }
+
+    LaunchedEffect(isConnectedOrConnecting, password) {
+        if (isConnectedOrConnecting) {
+            while(true) {
+                bleManager.sendCommand(MyTierProtocol.getStatus(password))
+                delay(10000)
+            }
         } else {
-            launcher.launch(permissions.toTypedArray())
+            // Wenn nicht verbunden, Scan-Flag setzen
+            isScanning = true
+        }
+    }
+
+    LaunchedEffect(isScanning) {
+        if (isScanning) {
+            val allGranted = permissions.all { 
+                androidx.core.content.ContextCompat.checkSelfPermission(context, it) == android.content.pm.PackageManager.PERMISSION_GRANTED 
+            }
+            if (allGranted) {
+                discoveredDevices.clear()
+                // Sicherheitshalber erst stoppen, falls noch ein alter Scan läuft
+                scanner.stopScan(scanCallback)
+                scanner.startScan(null, ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), scanCallback)
+            } else {
+                launcher.launch(permissions.toTypedArray())
+            }
+        } else {
+            scanner.stopScan(scanCallback)
         }
     }
 
     if (isConnectedOrConnecting) {
         DashboardScreenContent(
             status = scooterStatus,
-            connectionState = connectionState?.toString() ?: "...",
+            connectionState = connectionState.toString(),
             password = password,
+            scooterName = scooterCustomName,
             onPasswordChange = { password = it },
+            onNameChange = { scooterCustomName = it },
             onActionClick = {
-                val cmd = if (scooterStatus?.isLocked == true) MyTierProtocol.unlock(password) else MyTierProtocol.lock(password)
-                bleManager.sendCommand(cmd)
+                if (scooterStatus?.isLocked == true) {
+                    bleManager.sendCommand(MyTierProtocol.unlock(password))
+                } else {
+                    bleManager.sendCommand(MyTierProtocol.lock(password))
+                }
             },
             onDisconnect = { 
                 bleManager.disconnect().enqueue() 
-                prefs.edit().remove("last_mac").apply() 
+                isAutoConnectEnabled = false // Auto-Connect stoppen beim manuellen Trennen
+                currentMac = null
+            },
+            onForget = {
+                bleManager.disconnect().enqueue()
+                prefs.edit { 
+                    remove("last_mac")
+                    remove("pass_$currentMac")
+                    remove("name_$currentMac")
+                }
+                currentMac = null
             }
         )
     } else {
         DeviceListScreen(
             devices = discoveredDevices,
             isScanning = isScanning,
+            prefs = prefs,
             onDeviceClick = { device ->
-                prefs.edit().putString("last_mac", device.address).apply()
-                isScanning = false
-                scanner.stopScan(scanCallback)
+                currentMac = device.address
+                isAutoConnectEnabled = true // Wieder aktivieren bei manuellem Klick
+                prefs.edit { putString("last_mac", device.address) }
                 bleManager.connect(device).retry(3, 100).enqueue()
             }
         )
@@ -174,20 +244,31 @@ fun DashboardScreen(bleManager: ScooterBleManager) {
 }
 
 @Composable
-fun DeviceListScreen(devices: List<BluetoothDevice>, isScanning: Boolean, onDeviceClick: (BluetoothDevice) -> Unit) {
+fun DeviceListScreen(devices: List<BluetoothDevice>, isScanning: Boolean, prefs: SharedPreferences, onDeviceClick: (BluetoothDevice) -> Unit) {
+    val savedMacs = prefs.all.keys.filter { it.startsWith("pass_") }.map { it.removePrefix("pass_") }
+    val savedDevices = devices.filter { it.address in savedMacs }
+    val newDevices = devices.filter { it.address !in savedMacs }
+
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0F1113)).padding(24.dp)) {
         Column {
-            Text("Nearby Scooters", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
-            Text(if (isScanning) "Searching for your MyTier..." else "Scan paused", color = Color(0xFF00F2FF), fontSize = 14.sp)
+            Text("OpenTier Garage", color = Color.White, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+            Text(if (isScanning) "Searching for scooters..." else "Scan paused", color = Color(0xFF00F2FF), fontSize = 14.sp)
             Spacer(Modifier.height(24.dp))
-            if (devices.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Make sure your scooter is nearby and turned on.", color = Color.Gray)
+
+            LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (savedDevices.isNotEmpty()) {
+                    item { Text("YOUR SAVED SCOOTERS", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp)) }
+                    items(savedDevices) { device ->
+                        val customName = prefs.getString("name_${device.address}", device.name ?: "Unknown") ?: "Unknown"
+                        DeviceItem(device, customName, onDeviceClick)
+                    }
+                    item { Spacer(Modifier.height(24.dp)) }
                 }
-            } else {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(devices) { device ->
-                        DeviceItem(device, onDeviceClick)
+
+                if (newDevices.isNotEmpty()) {
+                    item { Text("DISCOVERED NEARBY", color = Color.Gray, fontSize = 12.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(bottom = 8.dp)) }
+                    items(newDevices) { device ->
+                        DeviceItem(device, device.name ?: "New Scooter", onDeviceClick)
                     }
                 }
             }
@@ -196,7 +277,7 @@ fun DeviceListScreen(devices: List<BluetoothDevice>, isScanning: Boolean, onDevi
 }
 
 @Composable
-fun DeviceItem(device: BluetoothDevice, onClick: (BluetoothDevice) -> Unit) {
+fun DeviceItem(device: BluetoothDevice, displayName: String, onClick: (BluetoothDevice) -> Unit) {
     Card(
         modifier = Modifier.fillMaxWidth().clickable { onClick(device) },
         shape = RoundedCornerShape(16.dp),
@@ -206,7 +287,7 @@ fun DeviceItem(device: BluetoothDevice, onClick: (BluetoothDevice) -> Unit) {
             Icon(Icons.Default.Bluetooth, null, tint = Color(0xFF00F2FF))
             Spacer(Modifier.width(16.dp))
             Column {
-                Text(device.name ?: "Unknown Scooter", color = Color.White, fontWeight = FontWeight.Bold)
+                Text(displayName, color = Color.White, fontWeight = FontWeight.Bold)
                 Text(device.address, color = Color.Gray, fontSize = 12.sp)
             }
         }
@@ -218,15 +299,23 @@ fun DashboardScreenContent(
     status: ScooterStatus?,
     connectionState: String,
     password: String,
+    scooterName: String,
     onPasswordChange: (String) -> Unit,
+    onNameChange: (String) -> Unit,
     onActionClick: () -> Unit,
-    onDisconnect: () -> Unit
+    onDisconnect: () -> Unit,
+    onForget: () -> Unit
 ) {
+    var passwordVisible by remember { mutableStateOf(false) }
+
     Box(modifier = Modifier.fillMaxSize().background(Color(0xFF0F1113))) {
         Column(modifier = Modifier.fillMaxSize().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("OpenTier", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                TextButton(onClick = onDisconnect) { Text("Forget Scooter", color = Color(0xFFFF4B4B)) }
+                Text(scooterName, color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                Row {
+                    TextButton(onClick = onDisconnect) { Text("Switch", color = Color(0xFF00F2FF)) }
+                    TextButton(onClick = onForget) { Text("Forget", color = Color(0xFFFF4B4B)) }
+                }
             }
             Surface(color = Color(0xFF1C1E21), shape = RoundedCornerShape(16.dp), modifier = Modifier.padding(top = 8.dp)) {
                 Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -238,7 +327,23 @@ fun DashboardScreenContent(
             Spacer(Modifier.height(24.dp))
             StatusCard(status)
             Spacer(Modifier.height(24.dp))
-            OutlinedTextField(value = password, onValueChange = onPasswordChange, label = { Text("Scooter Password", color = Color.Gray) }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White, focusedBorderColor = Color(0xFF00F2FF), unfocusedBorderColor = Color.DarkGray))
+            OutlinedTextField(value = scooterName, onValueChange = onNameChange, label = { Text("Scooter Name", color = Color.Gray) }, singleLine = true, modifier = Modifier.fillMaxWidth(), colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White, focusedBorderColor = Color(0xFF00F2FF), unfocusedBorderColor = Color.DarkGray))
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = password, 
+                onValueChange = onPasswordChange, 
+                label = { Text("Scooter Password", color = Color.Gray) }, 
+                singleLine = true, 
+                modifier = Modifier.fillMaxWidth(), 
+                visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                        Icon(if (passwordVisible) Icons.Default.LockOpen else Icons.Default.Lock, null, tint = Color.Gray)
+                    }
+                },
+                colors = OutlinedTextFieldDefaults.colors(focusedTextColor = Color.White, unfocusedTextColor = Color.White, focusedBorderColor = Color(0xFF00F2FF), unfocusedBorderColor = Color.DarkGray)
+            )
+            Spacer(Modifier.height(24.dp))
             Spacer(Modifier.weight(1f))
             LargeActionButton(isLocked = status?.isLocked ?: true, onClick = onActionClick)
             Spacer(Modifier.height(32.dp))
@@ -255,6 +360,9 @@ fun StatusCard(status: ScooterStatus?) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("${status?.batteryPercentage ?: "--"}%", color = Color.White, fontSize = 48.sp, fontWeight = FontWeight.Black)
                     Text("Battery", color = Color.Gray, fontSize = 16.sp)
+                    if (status != null) {
+                        Text("${String.format("%.1f", status.estimatedRange)} km", color = Color(0xFF00F2FF), fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
+                    }
                 }
             }
         }
