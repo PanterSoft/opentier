@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="app/src/main/res/ic_launcher-playstore.png" width="200" alt="Wireless Helper Logo">
+  <img src="app/src/main/res/ic_launcher-playstore.png" width="200" alt="OpenTIER Logo">
 </p>
 
 # OpenTIER
