@@ -1,3 +1,6 @@
+import java.io.FileInputStream
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -23,10 +26,15 @@ android {
     signingConfigs {
         create("release") {
             // Hier deinen HUR-Keystore eintragen
-            storeFile = file("release-key.jks")
-            storePassword = "DEIN_PASSWORT"
-            keyAlias = "DEIN_ALIAS"
-            keyPassword = "DEIN_PASSWORT"
+            storeFile = file("../opentier-release-key.jks")
+            keyAlias = "opentier"
+            val signingPropsFile = rootProject.file("secrets.properties")
+            if (signingPropsFile.exists()) {
+                val props = Properties()
+                props.load(FileInputStream(signingPropsFile))
+                storePassword = props.getProperty("KEYSTORE_PASSWORD")
+                keyPassword = props.getProperty("KEY_PASSWORD")
+            }
         }
     }
 
