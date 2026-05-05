@@ -1,0 +1,36 @@
+# Built application files
+*.apk
+*.ap_
+
+# Files for the Dalvik VM
+*.dex
+
+# Java class files
+*.class
+
+# Generated files
+bin/
+gen/
+out/
+
+# Gradle files
+.gradle/
+build/
+
+adi-registration.properties
+
+# Local configuration file (sdk path, etc)
+local.properties
+
+# Keystore files
+*.jks
+
+# Secrets configuration file
+secrets.properties
+
+.idea
+.vscode
+test_files
+java_*.hprof
+todos.txt
+bug/
