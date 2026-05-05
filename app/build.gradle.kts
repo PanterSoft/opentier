@@ -20,10 +20,22 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            // Hier deinen HUR-Keystore eintragen
+            storeFile = file("release-key.jks")
+            storePassword = "DEIN_PASSWORT"
+            keyAlias = "DEIN_ALIAS"
+            keyPassword = "DEIN_PASSWORT"
+        }
+    }
+
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            signingConfig = signingConfigs.getByName("release")
         }
     }
     compileOptions {
@@ -38,6 +50,13 @@ android {
     }
     composeOptions {
         kotlinCompilerExtensionVersion = "1.5.8"
+    }
+
+    applicationVariants.all {
+        outputs.all {
+            val output = this as com.android.build.gradle.internal.api.ApkVariantOutputImpl
+            output.outputFileName = "com.andrerinas.opentier-${versionName}-${name}.apk"
+        }
     }
 }
 
