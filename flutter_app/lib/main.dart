@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -56,6 +57,7 @@ class _HomeState extends State<Home> {
   bool _connected = false;
   bool _autoConnect = true;
   String _connText = 'Disconnected';
+  String? _bleBlocked; // non-null = why BLE can't run (simulator, denied, off)
   ScooterStatus? _status;
 
   SharedPreferences get prefs => widget.prefs;
@@ -67,18 +69,44 @@ class _HomeState extends State<Home> {
   }
 
   Future<void> _startFlow() async {
-    if (!await _ensurePermissions()) return;
+    if (!await FlutterBluePlus.isSupported) {
+      setState(() => _bleBlocked =
+          'Bluetooth is not available on this device (iOS Simulator has no Bluetooth — use a real iPhone).');
+      return;
+    }
+    if (!await _ensurePermissions()) {
+      setState(() => _bleBlocked =
+          'Bluetooth permission denied. Enable it in Settings to find your scooter.');
+      return;
+    }
+    // Starting a scan triggers the iOS system Bluetooth permission dialog
+    // (NSBluetoothAlwaysUsageDescription); wait until the user answered it.
+    final adapter = await FlutterBluePlus.adapterState
+        .where((s) =>
+            s == BluetoothAdapterState.on ||
+            s == BluetoothAdapterState.off ||
+            s == BluetoothAdapterState.unauthorized)
+        .first;
+    if (adapter != BluetoothAdapterState.on) {
+      setState(() => _bleBlocked = adapter == BluetoothAdapterState.unauthorized
+          ? 'Bluetooth permission denied. Enable it in Settings > OpenTier.'
+          : 'Bluetooth is turned off. Turn it on to find your scooter.');
+      return;
+    }
+    setState(() => _bleBlocked = null);
     _dataSub = _ble.receivedData.listen(_onData);
     _startScan();
   }
 
   Future<bool> _ensurePermissions() async {
-    final perms = <Permission>[
+    // iOS shows its own Bluetooth dialog when scanning starts; only Android
+    // needs explicit runtime permissions.
+    if (Platform.isIOS) return true;
+    final results = await [
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
       Permission.locationWhenInUse,
-    ];
-    final results = await perms.request();
+    ].request();
     return results.values.every((s) => s.isGranted || s.isLimited);
   }
 
@@ -211,6 +239,8 @@ class _HomeState extends State<Home> {
             : DeviceListScreen(
                 devices: _devices,
                 prefs: prefs,
+                blockedReason: _bleBlocked,
+                onRetry: _startFlow,
                 onTap: (d) {
                   _autoConnect = true;
                   _connectTo(d);
@@ -224,11 +254,15 @@ class _HomeState extends State<Home> {
 class DeviceListScreen extends StatelessWidget {
   final List<BluetoothDevice> devices;
   final SharedPreferences prefs;
+  final String? blockedReason;
+  final VoidCallback onRetry;
   final void Function(BluetoothDevice) onTap;
   const DeviceListScreen(
       {super.key,
       required this.devices,
       required this.prefs,
+      this.blockedReason,
+      required this.onRetry,
       required this.onTap});
 
   @override
@@ -251,8 +285,14 @@ class DeviceListScreen extends StatelessWidget {
                 color: Colors.white,
                 fontSize: 28,
                 fontWeight: FontWeight.bold)),
-        const Text('Searching for scooters...',
-            style: TextStyle(color: _accent, fontSize: 14)),
+        Text(blockedReason ?? 'Searching for scooters...',
+            style: TextStyle(
+                color: blockedReason == null ? _accent : _danger,
+                fontSize: 14)),
+        if (blockedReason != null)
+          TextButton(
+              onPressed: onRetry,
+              child: const Text('Retry', style: TextStyle(color: _accent))),
         const SizedBox(height: 24),
         Expanded(
           child: ListView(children: [
