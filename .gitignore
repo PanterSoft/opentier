@@ -35,3 +35,4 @@ java_*.hprof
 todos.txt
 bug/
 .DS_Store
+graphify-out/*
